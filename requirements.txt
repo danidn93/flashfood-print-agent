@@ -1,0 +1,6 @@
+requests==2.32.5
+PyInstaller==6.16.0
+Pillow==11.3.0
+customtkinter==5.2.2
+darkdetect==0.8.0
+pywin32==311; platform_system=="Windows"
