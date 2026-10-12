@@ -1,0 +1,62 @@
+name: Build FlashFood Print Agent
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            target: windows
+          - os: macos-15
+            target: macos
+          - os: ubuntu-24.04
+            target: linux
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Linux packages
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y python3-tk libcups2
+      - name: Install requirements
+        run: python -m pip install -r requirements.txt
+      - name: Configure public backend
+        shell: bash
+        env:
+          FF_SUPABASE_URL: ${{ vars.FF_SUPABASE_URL }}
+          FF_SUPABASE_ANON_KEY: ${{ secrets.FF_SUPABASE_ANON_KEY }}
+        run: python scripts/write_build_config.py
+      - name: Build
+        shell: bash
+        run: python -m PyInstaller --noconfirm --clean FlashFoodPrintAgent-${{ matrix.target }}.spec
+      - name: Windows setup
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: '& "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" "installer\windows.iss"'
+      - name: macOS package
+        if: runner.os == 'macOS'
+        run: ditto -c -k --sequesterRsrc --keepParent dist/FlashFoodPrintAgent.app FlashFoodPrintAgent-macOS.zip
+      - name: Linux package
+        if: runner.os == 'Linux'
+        run: tar -czf FlashFoodPrintAgent-Linux.tar.gz -C dist FlashFoodPrintAgent
+      - uses: actions/upload-artifact@v4
+        if: runner.os == 'Windows'
+        with:
+          name: FlashFoodPrintAgent-Windows
+          path: installer/output/*.exe
+      - uses: actions/upload-artifact@v4
+        if: runner.os == 'macOS'
+        with:
+          name: FlashFoodPrintAgent-macOS
+          path: FlashFoodPrintAgent-macOS.zip
+      - uses: actions/upload-artifact@v4
+        if: runner.os == 'Linux'
+        with:
+          name: FlashFoodPrintAgent-Linux
+          path: FlashFoodPrintAgent-Linux.tar.gz
