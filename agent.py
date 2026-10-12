@@ -25,7 +25,7 @@ from build_config import (
 )
 
 APP_NAME = "FlashFood Print Agent"
-APP_VERSION = "1.5.0"
+APP_VERSION = "1.5.1"
 POLL_SECONDS = 3
 REQUEST_TIMEOUT = 20
 
@@ -262,7 +262,7 @@ def save_ticket_as_pdf(text: str) -> Path:
     log(f"Ticket de prueba PDF: {path}")
     return path
 
-def print_text_windows(printer_name: str, text: str) -> None:
+def print_text_windows(printer_name: str, text: str, cut: bool = True) -> None:
     try:
         import win32print
     except Exception as e:
@@ -281,6 +281,9 @@ def print_text_windows(printer_name: str, text: str) -> None:
             win32print.StartPagePrinter(hprinter)
             # ESC/POS init + CP850 where supported.
             data = b"\x1b@" + text.encode("cp850", errors="replace") + b"\n\n\n"
+            if cut:
+                # ESC/POS: feed 3 lines and partial cut, supported by most receipt printers.
+                data += b"\x1b\x64\x03\x1d\x56\x01"
             win32print.WritePrinter(hprinter, data)
             win32print.EndPagePrinter(hprinter)
         finally:
@@ -288,10 +291,10 @@ def print_text_windows(printer_name: str, text: str) -> None:
     finally:
         win32print.ClosePrinter(hprinter)
 
-def print_text_unix(printer_name: str, text: str) -> None:
+def print_text_unix(printer_name: str, text: str, cut: bool = True) -> None:
     p = subprocess.run(
         ["lp", "-d", printer_name, "-o", "raw"],
-        input=text.encode("utf-8", errors="replace"),
+        input=text.encode("utf-8", errors="replace") + (b"\n\n\n\x1b\x64\x03\x1d\x56\x01" if cut else b""),
         capture_output=True,
         timeout=30,
     )
@@ -301,16 +304,16 @@ def print_text_unix(printer_name: str, text: str) -> None:
             .decode("utf-8", errors="replace")
         )
 
-def print_text(printer_name: str, text: str) -> None:
+def print_text(printer_name: str, text: str, cut: bool = True) -> None:
     if printer_name == PDF_TEST_PRINTER:
         save_ticket_as_pdf(text)
         return
     if not printer_name:
         raise RuntimeError("No hay impresora configurada para este tipo de trabajo.")
     if platform.system().lower() == "windows":
-        print_text_windows(printer_name, text)
+        print_text_windows(printer_name, text, cut)
     else:
-        print_text_unix(printer_name, text)
+        print_text_unix(printer_name, text, cut)
 
 def money(value: Any) -> str:
     try:
@@ -603,7 +606,11 @@ class Worker(threading.Thread):
                     printer, text = choose_printer_and_text(cfg, job)
                     if not printer:
                         raise RuntimeError("No hay impresora configurada para este trabajo.")
-                    print_text(printer, text)
+                    destination = clean(job.get("destino") or job.get("destination") or "").lower()
+                    job_type = clean(job.get("tipo") or job.get("type") or "").lower()
+                    is_invoice = (destination in {"factura", "facturas", "mostrador", "invoice"}
+                                  or "factura" in job_type or "invoice" in job_type)
+                    print_text(printer, text, cfg.invoice_cut if is_invoice else cfg.kitchen_cut)
                     rpc(
                         cfg,
                         "print_agent_finish_job",
@@ -982,9 +989,9 @@ class App(ctk.CTk):
             self.login_var = ctk.BooleanVar(value=macos_login_enabled())
             self.automation_row(card, "Abrir al iniciar sesión en macOS",
                                 "Inicia el agente automáticamente.", self.login_var)
-            self.button(card, "Buscar actualizaciones", self.check_updates).pack(
-                fill="x", padx=24, pady=(8, 10)
-            )
+        self.button(card, "Buscar actualizaciones", self.check_updates).pack(
+            fill="x", padx=24, pady=(8, 10)
+        )
 
         self.label(card,"AUTOMATIZACIÓN",11,"bold",self.ORANGE).pack(anchor="w",padx=24,pady=(8,5))
         self.auto_var=ctk.BooleanVar(value=self.cfg.auto_start_worker)
