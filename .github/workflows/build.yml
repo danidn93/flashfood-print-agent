@@ -1,10 +1,20 @@
-name: Build FlashFood Print Agent
+name: FlashFood Agent - build installers
+
 on:
   workflow_dispatch:
+    inputs:
+      version:
+        description: "Versión a publicar (ej. 1.5.0)"
+        required: true
+        default: "1.5.0"
+
 permissions:
-  contents: read
+  contents: write
+
 jobs:
   build:
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
@@ -15,48 +25,95 @@ jobs:
             target: macos
           - os: ubuntu-24.04
             target: linux
-    runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Python 3.12
+        uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - name: Linux packages
+      - name: Install Linux libraries
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y python3-tk libcups2
-      - name: Install requirements
-        run: python -m pip install -r requirements.txt
-      - name: Configure public backend
+        run: sudo apt-get update && sudo apt-get install -y python3-tk libcups2-dev
+      - name: Install Python requirements
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+      - name: Generate public Supabase build configuration
         shell: bash
         env:
           FF_SUPABASE_URL: ${{ vars.FF_SUPABASE_URL }}
           FF_SUPABASE_ANON_KEY: ${{ secrets.FF_SUPABASE_ANON_KEY }}
         run: python scripts/write_build_config.py
-      - name: Build
+      - name: Build PyInstaller bundle
         shell: bash
         run: python -m PyInstaller --noconfirm --clean FlashFoodPrintAgent-${{ matrix.target }}.spec
-      - name: Windows setup
+      - name: Ensure Inno Setup
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          if (!(Test-Path 'C:\Program Files (x86)\Inno Setup 6\ISCC.exe')) {
+            choco install innosetup -y --no-progress
+          }
+      - name: Create Windows setup
         if: runner.os == 'Windows'
         shell: pwsh
         run: '& "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" "installer\windows.iss"'
-      - name: macOS package
+      - name: Compress macOS app
         if: runner.os == 'macOS'
         run: ditto -c -k --sequesterRsrc --keepParent dist/FlashFoodPrintAgent.app FlashFoodPrintAgent-macOS.zip
-      - name: Linux package
+      - name: Compress Linux app
         if: runner.os == 'Linux'
         run: tar -czf FlashFoodPrintAgent-Linux.tar.gz -C dist FlashFoodPrintAgent
-      - uses: actions/upload-artifact@v4
+      - name: Upload Windows setup
         if: runner.os == 'Windows'
+        uses: actions/upload-artifact@v4
         with:
           name: FlashFoodPrintAgent-Windows
           path: installer/output/*.exe
-      - uses: actions/upload-artifact@v4
+          if-no-files-found: error
+      - name: Upload macOS ZIP
         if: runner.os == 'macOS'
+        uses: actions/upload-artifact@v4
         with:
           name: FlashFoodPrintAgent-macOS
           path: FlashFoodPrintAgent-macOS.zip
-      - uses: actions/upload-artifact@v4
+          if-no-files-found: error
+      - name: Upload Linux tarball
         if: runner.os == 'Linux'
+        uses: actions/upload-artifact@v4
         with:
           name: FlashFoodPrintAgent-Linux
           path: FlashFoodPrintAgent-Linux.tar.gz
+          if-no-files-found: error
+
+  publish-release:
+    name: Publish GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download installers from this run
+        uses: actions/download-artifact@v4
+        with:
+          pattern: FlashFoodPrintAgent-*
+          path: release-assets
+          merge-multiple: true
+      - name: Verify installers
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f release-assets/FlashFoodPrintAgent_Windows_Setup.exe
+          test -f release-assets/FlashFoodPrintAgent-macOS.zip
+          test -f release-assets/FlashFoodPrintAgent-Linux.tar.gz
+          ls -lh release-assets/
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ inputs.version }}
+          name: FlashFood Print Agent v${{ inputs.version }}
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          files: |
+            release-assets/FlashFoodPrintAgent_Windows_Setup.exe
+            release-assets/FlashFoodPrintAgent-macOS.zip
+            release-assets/FlashFoodPrintAgent-Linux.tar.gz
