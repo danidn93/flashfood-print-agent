@@ -141,36 +141,71 @@ def rpc(cfg: AgentConfig, name: str, payload: Dict[str, Any]) -> Any:
     except Exception:
         return r.text
 
+PDF_TEST_PRINTER = "FlashFood - Guardar ticket en PDF (prueba)"
+
 def list_printers() -> List[str]:
     system = platform.system().lower()
     result: List[str] = []
     try:
         if system == "windows":
-            ps = [
-                "powershell",
-                "-NoProfile",
-                "-Command",
-                "Get-Printer | Select-Object -ExpandProperty Name",
-            ]
-            p = subprocess.run(ps, capture_output=True, text=True, timeout=15)
+            p = subprocess.run(
+                ["powershell", "-NoProfile", "-Command",
+                 "Get-Printer | Select-Object -ExpandProperty Name"],
+                capture_output=True, text=True, timeout=15,
+            )
             if p.returncode == 0:
                 result = [x.strip() for x in p.stdout.splitlines() if x.strip()]
         else:
-            p = subprocess.run(
-                ["lpstat", "-p"],
-                capture_output=True,
-                text=True,
-                timeout=15,
-            )
+            # lpstat -e returns queue names independent of the OS language.
+            p = subprocess.run(["lpstat", "-e"], capture_output=True, text=True, timeout=15)
             if p.returncode == 0:
-                for line in p.stdout.splitlines():
-                    # printer NOMBRE is idle...
-                    parts = line.split()
-                    if len(parts) >= 2 and parts[0].lower() == "printer":
-                        result.append(parts[1])
+                result = [x.strip() for x in p.stdout.splitlines() if x.strip()]
+            if not result:
+                p = subprocess.run(["lpstat", "-v"], capture_output=True, text=True, timeout=15)
+                if p.returncode == 0:
+                    result = [
+                        line.split(":", 1)[0].rsplit(" ", 1)[-1]
+                        for line in p.stdout.splitlines() if ":" in line
+                    ]
     except Exception as e:
         log(f"No se pudieron listar impresoras: {e}")
     return sorted(set(result), key=str.lower)
+
+
+def save_ticket_as_pdf(text: str) -> Path:
+    """Generate a local test ticket; no CUPS queue or physical printer required."""
+    from reportlab.pdfgen import canvas
+    from reportlab.lib.pagesizes import mm
+    from reportlab.pdfbase import pdfmetrics
+    from reportlab.pdfbase.ttfonts import TTFont
+
+    directory = Path.home() / "Documents" / "FlashFood Print Agent" / "Tickets PDF"
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / f"ticket-{time.strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:8]}.pdf"
+    lines = text.expandtabs(4).splitlines() or [""]
+    width = 80 * mm
+    margin = 4 * mm
+    font_name = "Courier"
+    font_path = Path("/System/Library/Fonts/Supplemental/Courier New.ttf")
+    if font_path.exists():
+        try:
+            pdfmetrics.registerFont(TTFont("FlashFoodCourier", str(font_path)))
+            font_name = "FlashFoodCourier"
+        except Exception:
+            pass
+    font_size = 8
+    leading = 10
+    height = max(60 * mm, (len(lines) * leading + 2 * margin))
+    pdf = canvas.Canvas(str(path), pagesize=(width, height))
+    pdf.setTitle("FlashFood - Ticket de prueba")
+    pdf.setFont(font_name, font_size)
+    y = height - margin - leading
+    for line in lines:
+        pdf.drawString(margin, y, line[:50])
+        y -= leading
+    pdf.save()
+    log(f"Ticket de prueba PDF: {path}")
+    return path
 
 def print_text_windows(printer_name: str, text: str) -> None:
     try:
@@ -212,6 +247,9 @@ def print_text_unix(printer_name: str, text: str) -> None:
         )
 
 def print_text(printer_name: str, text: str) -> None:
+    if printer_name == PDF_TEST_PRINTER:
+        save_ticket_as_pdf(text)
+        return
     if not printer_name:
         raise RuntimeError("No hay impresora configurada para este tipo de trabajo.")
     if platform.system().lower() == "windows":
@@ -942,11 +980,11 @@ class App(ctk.CTk):
         self.activities=[]; self.refresh_activity()
 
     def refresh_printers(self):
-        printers=list_printers(); values=printers or [""]
+        printers=list_printers(); values=[PDF_TEST_PRINTER] + printers
         if hasattr(self,"kitchen_combo"): self.kitchen_combo.configure(values=values)
         if hasattr(self,"invoice_combo"): self.invoice_combo.configure(values=values)
         self.add_activity(
-            f"{len(printers)} impresora(s) detectada(s)" if printers else "No se detectaron impresoras",
+            f"{len(printers)} impresora(s) del sistema y modo PDF de prueba disponible",
             "Sistema","Conectado" if printers else "Revisar"
         )
 
