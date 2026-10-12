@@ -1,4 +1,6 @@
 import json
+import plistlib
+import webbrowser
 import os
 import platform
 import subprocess
@@ -142,6 +144,59 @@ def rpc(cfg: AgentConfig, name: str, payload: Dict[str, Any]) -> Any:
         return r.text
 
 PDF_TEST_PRINTER = "FlashFood - Guardar ticket en PDF (prueba)"
+
+UPDATE_FEED_URL = "https://api.github.com/repos/danidn93/flashfood-print-agent/releases/latest"
+LOGIN_AGENT_LABEL = "com.flashfood.printagent.login"
+
+
+def macos_login_agent_path() -> Path:
+    return Path.home() / "Library" / "LaunchAgents" / f"{LOGIN_AGENT_LABEL}.plist"
+
+
+def macos_login_enabled() -> bool:
+    return platform.system() == "Darwin" and macos_login_agent_path().exists()
+
+
+def set_macos_login_enabled(enabled: bool) -> None:
+    if platform.system() != "Darwin":
+        raise RuntimeError("Esta opción está disponible en macOS.")
+    path = macos_login_agent_path()
+    if not enabled:
+        path.unlink(missing_ok=True)
+        return
+    executable = Path(sys.executable).resolve()
+    if not getattr(sys, "frozen", False):
+        raise RuntimeError("Instala la aplicación compilada en Aplicaciones antes de activar el inicio automático.")
+    if ".app/Contents/MacOS/" not in str(executable):
+        raise RuntimeError("Abre el agente desde la aplicación .app instalada en Aplicaciones.")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "Label": LOGIN_AGENT_LABEL,
+        "ProgramArguments": [str(executable)],
+        "RunAtLoad": True,
+        "KeepAlive": False,
+        "ProcessType": "Interactive",
+    }
+    with path.open("wb") as file:
+        plistlib.dump(payload, file)
+
+
+def release_version_info() -> tuple[str, str]:
+    """Return the latest published release; never auto-execute downloaded code."""
+    response = requests.get(UPDATE_FEED_URL, timeout=15, headers={"Accept": "application/vnd.github+json"})
+    if response.status_code == 404:
+        raise RuntimeError("Todavía no hay una versión pública disponible para actualizar.")
+    response.raise_for_status()
+    data = response.json()
+    return str(data.get("tag_name", "")).lstrip("v"), str(data.get("html_url", ""))
+
+
+def version_parts(version: str) -> tuple[int, ...]:
+    try:
+        return tuple(int(part) for part in version.split("."))
+    except ValueError:
+        return (0,)
+
 
 def list_printers() -> List[str]:
     system = platform.system().lower()
@@ -923,6 +978,14 @@ class App(ctk.CTk):
                 anchor="w",padx=14,pady=(1,10)
             )
 
+        if platform.system() == "Darwin":
+            self.login_var = ctk.BooleanVar(value=macos_login_enabled())
+            self.automation_row(card, "Abrir al iniciar sesión en macOS",
+                                "Inicia el agente automáticamente.", self.login_var)
+            self.button(card, "Buscar actualizaciones", self.check_updates).pack(
+                fill="x", padx=24, pady=(8, 10)
+            )
+
         self.label(card,"AUTOMATIZACIÓN",11,"bold",self.ORANGE).pack(anchor="w",padx=24,pady=(8,5))
         self.auto_var=ctk.BooleanVar(value=self.cfg.auto_start_worker)
         self.automation_row(card,"Impresión automática","Recibe trabajos sin confirmación.",self.auto_var)
@@ -988,6 +1051,25 @@ class App(ctk.CTk):
             "Sistema","Conectado" if printers else "Revisar"
         )
 
+    def check_updates(self):
+        def worker():
+            try:
+                latest, url = release_version_info()
+                if not latest:
+                    raise RuntimeError("La versión publicada no contiene número de versión.")
+                def show():
+                    if version_parts(latest) > version_parts(APP_VERSION):
+                        if messagebox.askyesno(APP_NAME,
+                            f"Disponible v{latest}. Se abrirá la página oficial para descargarla. "
+                            "La instalación no es automática todavía. ¿Abrir ahora?"):
+                            webbrowser.open(url)
+                    else:
+                        messagebox.showinfo(APP_NAME, f"Ya tienes la última versión publicada (v{APP_VERSION}).")
+                self.after(0, show)
+            except Exception as error:
+                self.after(0, lambda msg=str(error): messagebox.showwarning(APP_NAME, msg))
+        threading.Thread(target=worker, daemon=True).start()
+
     def _read_settings(self):
         if not self.cfg.agent_token: return
         self.cfg.device_name=self.device_var.get().strip() or platform.node()
@@ -1008,6 +1090,11 @@ class App(ctk.CTk):
     def save_settings(self, show=False):
         if not self.cfg.agent_token: return
         self._read_settings(); save_config(self.cfg)
+        if platform.system() == 'Darwin' and hasattr(self, 'login_var'):
+            try:
+                set_macos_login_enabled(bool(self.login_var.get()))
+            except Exception as error:
+                messagebox.showwarning(APP_NAME, f'No se pudo configurar el inicio automático: {error}')
         try:
             rpc(self.cfg,"print_agent_update_config",{
                 "p_token":self.cfg.agent_token,
