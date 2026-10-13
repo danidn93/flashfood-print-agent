@@ -1,5 +1,5 @@
 #define MyAppName "FlashFood Print Agent"
-#define MyAppVersion "1.5.1"
+#define MyAppVersion "1.6.0"
 #define MyAppPublisher "FlashFood"
 #define MyAppExeName "FlashFoodPrintAgent.exe"
 
