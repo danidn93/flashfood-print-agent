@@ -438,88 +438,139 @@ def format_kitchen(payload: Dict[str, Any]) -> str:
     lines.append(center("GRACIAS", width))
     return "\n".join(lines) + "\n"
 
-def format_invoice(payload: Dict[str, Any]) -> str:
-    width = 42
-    lines: List[str] = []
-
-    local_name = clean(
-        payload.get("nombre_comercial")
-        or payload.get("local_nombre")
-        or payload.get("negocio")
-        or "RESTAURANTE"
+def invoice_data(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Read nested invoice_receipt_v1 or legacy flat payload."""
+    loc = payload.get("local") or {}
+    fac = payload.get("factura") or {}
+    cli = payload.get("cliente") or {}
+    def val(obj, *keys):
+        for k in keys:
+            if obj.get(k) is not None and str(obj[k]).strip():
+                return obj[k]
+        return None
+    return dict(
+        name=val(loc,"nombre","nombre_comercial") or val(payload,"nombre_comercial","local_nombre"),
+        legal=val(loc,"razon_social"), ruc=val(loc,"ruc"),
+        address=val(loc,"direccion"), phone=val(loc,"telefono"),
+        logo=val(loc,"logo_url") or val(payload,"logo_url"),
+        number=val(fac,"numero") or val(payload,"numero_factura","factura_numero"),
+        date=val(fac,"fecha") or val(payload,"fecha"),
+        state=val(fac,"sri_estado") or val(payload,"sri_estado"),
+        key=val(fac,"clave_acceso") or val(payload,"clave_acceso"),
+        authorization=val(fac,"autorizacion_sri"),
+        client=val(cli,"nombre") or val(payload,"cliente_nombre"),
+        ident=val(cli,"identificacion") or val(payload,"cliente_identificacion"),
+        client_address=val(cli,"direccion"), client_email=val(cli,"email"),
+        payment=val(fac,"metodo_pago") or val(payload,"metodo_pago"),
+        subtotal=fac.get("subtotal_sri",payload.get("subtotal")),
+        iva=fac.get("iva_sri",payload.get("impuestos")),
+        total=fac.get("total_sri",payload.get("total")),
+        items=extract_items(payload),
+        message=payload.get("mensaje_final") or "Gracias por tu visita!"
     )
-    invoice_number = clean(payload.get("numero_factura") or payload.get("factura_numero"))
-    client = clean(payload.get("cliente_nombre") or payload.get("cliente"))
-    ident = clean(payload.get("cliente_identificacion") or payload.get("identificacion"))
-    payment = clean(payload.get("metodo_pago") or payload.get("metodo"))
-    source = clean(payload.get("origen") or "APP").upper()
-    delivery_type = clean(payload.get("tipo_entrega")).lower()
 
-    lines.append(center(local_name.upper(), width))
-    lines.append(center("FACTURA / COMPROBANTE", width))
-    if invoice_number:
-        lines.append(center(invoice_number, width))
+
+def format_invoice(payload: Dict[str, Any], paper_mm: int = 80) -> str:
+    d = invoice_data(payload)
+    width = 32 if paper_mm <= 58 else 42
+    if not d["name"] or not d["number"] or not d["items"]:
+        raise ValueError("Factura incompleta: faltan local, numero o productos")
+    lines = [center(str(d["name"]).upper(),width)]
+    for label,key in (("RAZON SOCIAL","legal"),("RUC","ruc"),("DIRECCION","address"),("TELEFONO","phone")):
+        if d[key]: lines.extend(wrap_text(f"{label}: {d[key]}",width))
+    lines += [line(width),center("FACTURA ELECTRONICA",width),center(str(d["number"]),width)]
+    if d["date"]: lines.append(f"FECHA: {d['date']}")
     lines.append(line(width))
-
-    if client:
-        lines.append(f"CLIENTE: {client}")
-    if ident:
-        lines.append(f"ID: {ident}")
-    if payment:
-        lines.append(f"PAGO: {payment.upper()}")
-    lines.append(f"ORIGEN: {source}")
-    if delivery_type:
-        lines.append(
-            f"ENTREGA: {'DELIVERY' if delivery_type == 'delivery' else 'RETIRO EN LOCAL'}"
-        )
-
-    items = extract_items(payload)
-    if items:
-        lines.append(line(width))
-        for item in items:
-            qty = item_qty(item)
-            name = item_name(item)
-            subtotal = item.get("subtotal")
-            text = f"{qty} x {name}"
-            for w in wrap_text(text, width):
-                lines.append(w)
-            if subtotal is not None:
-                lines.append(f"{'':24}{money(subtotal):>18}")
-
+    for label,key in (("CLIENTE","client"),("CI/RUC","ident"),("DIRECCION","client_address"),("EMAIL","client_email"),("PAGO","payment")):
+        if d[key]: lines.extend(wrap_text(f"{label}: {d[key]}",width))
     lines.append(line(width))
-    if payload.get("subtotal") is not None:
-        lines.append(f"{'SUBTOTAL':<24}{money(payload.get('subtotal')):>18}")
-    if payload.get("impuestos") is not None:
-        lines.append(f"{'IVA':<24}{money(payload.get('impuestos')):>18}")
-    if payload.get("total") is not None:
-        lines.append(f"{'TOTAL FACTURA':<24}{money(payload.get('total')):>18}")
+    for item in d["items"]:
+        name = clean(item.get("descripcion_snapshot") or item.get("descripcion") or item.get("nombre_producto") or item.get("nombre"))
+        if not name or name.lower() in ("producto","consumo"):
+            raise ValueError("Producto sin descripcion real en la factura")
+        lines.extend(wrap_text(f"{item_qty(item)} x {name}",width))
+        price,subtotal=item.get("precio_unitario"),item.get("subtotal")
+        if price is not None or subtotal is not None:
+            left=f"P.U. {money(price)}" if price is not None else ""
+            right="$"+money(subtotal) if subtotal is not None else ""
+            lines.append(f"{left:<{width-12}}{right:>12}")
+    lines.append(line(width))
+    for label,key in (("SUBTOTAL","subtotal"),("IVA","iva"),("TOTAL FACTURA","total")):
+        if d[key] is not None: lines.append(f"{label:<{width-12}}{('$'+money(d[key])):>12}")
+    lines.append(line(width))
+    state=clean(d["state"]).upper() or "SIN ESTADO SRI"
+    lines.extend(wrap_text(f"ESTADO SRI: {state}",width))
+    if d["authorization"] and state in ("AUTORIZADA","AUTORIZADO"):
+        lines.extend(wrap_text(f"AUTORIZACION: {d['authorization']}",width))
+    if d["key"]:
+        lines.append(center("CLAVE DE ACCESO",width))
+        lines.extend(wrap_text(str(d["key"]),width))
+    if state not in ("AUTORIZADA","AUTORIZADO"): lines.append(center("NO CONSTA COMO AUTORIZADA",width))
+    lines.append(line(width))
+    lines.extend(wrap_text(str(d["message"]),width))
+    return "\n".join(lines)+"\n"
 
-    extras = [
-        ("DELIVERY", payload.get("app_costo_delivery") or payload.get("costo_delivery")),
-        ("SERVICIO APP", payload.get("app_tarifa_servicio") or payload.get("tarifa_servicio")),
-        ("PRIORIDAD", payload.get("app_tarifa_prioridad") or payload.get("tarifa_prioridad")),
-        ("PROPINA", payload.get("app_propina_delivery") or payload.get("propina_delivery")),
-    ]
-    shown = False
-    for label, value in extras:
+
+def print_invoice_with_logo(printer_name: str, text: str, logo_url: str, paper_mm: int = 80, cut: bool = True) -> None:
+    """ESC/POS image followed by text; kitchen remains unchanged."""
+    if printer_name == PDF_TEST_PRINTER:
+        save_ticket_as_pdf(text)
+        return
+    from io import BytesIO
+    from urllib.parse import urlparse
+    from PIL import Image, ImageOps
+    import socket
+    import ipaddress
+    if not printer_name: raise RuntimeError("No hay impresora de facturas")
+    logo=b""
+    if logo_url:
+        parsed=urlparse(logo_url)
+        if parsed.scheme!="https" or not parsed.hostname: raise ValueError("Logo debe tener URL HTTPS publica")
+        for addr in socket.getaddrinfo(parsed.hostname,443,type=socket.SOCK_STREAM):
+            if not ipaddress.ip_address(addr[4][0]).is_global: raise ValueError("URL de logo no publica")
+        resp=requests.get(logo_url,timeout=12,stream=True,allow_redirects=False)
         try:
-            if float(value or 0) > 0:
-                if not shown:
-                    lines.append(line(width))
-                    lines.append(center("CARGOS NO INCLUIDOS EN SRI", width))
-                    shown = True
-                lines.append(f"{label:<24}{money(value):>18}")
-        except Exception:
-            pass
+            resp.raise_for_status()
+            if not resp.headers.get("content-type","").lower().startswith("image/"): raise ValueError("Logo no es imagen")
+            raw=resp.raw.read(1500001)
+        finally: resp.close()
+        if len(raw)>1500000: raise ValueError("Logo excede 1.5 MB")
+        im=Image.open(BytesIO(raw))
+        if im.width*im.height>12000000: raise ValueError("Logo demasiado grande")
+        im=im.convert("RGBA")
+        bg=Image.new("RGBA",im.size,"white");bg.alpha_composite(im)
+        im=bg.convert("RGB")
+        max_width=384 if paper_mm<=58 else 576
+        im.thumbnail((max_width,260))
+        im=ImageOps.grayscale(im).convert("1")
+        canvas=Image.new("1",(max_width,im.height),1)
+        canvas.paste(im,((max_width-im.width)//2,0))
+        pixels=canvas.load();wbytes=(canvas.width+7)//8;raster=bytearray()
+        for y in range(canvas.height):
+            for xb in range(wbytes):
+                byte=0
+                for bit in range(8):
+                    x=xb*8+bit
+                    if x<canvas.width and pixels[x,y]==0: byte|=1<<(7-bit)
+                raster.append(byte)
+        logo=b"\x1b\x61\x01\x1d\x76\x30\x00"+bytes((wbytes&255,wbytes>>8,canvas.height&255,canvas.height>>8))+bytes(raster)+b"\n\x1b\x61\x00"
+    data=b"\x1b@"+logo+text.encode("cp850",errors="replace")+b"\n\n\n"
+    if cut:data+=b"\x1b\x64\x03\x1d\x56\x01"
+    if platform.system().lower()=="windows":
+        import win32print
+        h=win32print.OpenPrinter(printer_name)
+        try:
+            win32print.StartDocPrinter(h,1,(APP_NAME,None,"RAW"))
+            try:
+                win32print.StartPagePrinter(h)
+                win32print.WritePrinter(h,data)
+                win32print.EndPagePrinter(h)
+            finally:win32print.EndDocPrinter(h)
+        finally:win32print.ClosePrinter(h)
+    else:
+        p=subprocess.run(["lp","-d",printer_name,"-o","raw"],input=data,capture_output=True,timeout=30)
+        if p.returncode:raise RuntimeError((p.stderr or p.stdout).decode("utf-8",errors="replace"))
 
-    total_paid = payload.get("app_total_pagado") or payload.get("total_pagado")
-    if total_paid is not None:
-        lines.append(f"{'TOTAL PAGADO':<24}{money(total_paid):>18}")
-
-    lines.append(line(width))
-    lines.append(center("¡GRACIAS POR TU VISITA!", width))
-    lines.append(center(local_name, width))
-    return "\n".join(lines) + "\n"
 
 def choose_printer_and_text(cfg: AgentConfig, job: Dict[str, Any]) -> Tuple[str, str]:
     tipo = clean(job.get("tipo")).lower()
@@ -610,7 +661,13 @@ class Worker(threading.Thread):
                     job_type = clean(job.get("tipo") or job.get("type") or "").lower()
                     is_invoice = (destination in {"factura", "facturas", "mostrador", "invoice"}
                                   or "factura" in job_type or "invoice" in job_type)
-                    print_text(printer, text, cfg.invoice_cut if is_invoice else cfg.kitchen_cut)
+                    if is_invoice:
+                        payload = job.get("payload") if isinstance(job.get("payload"),dict) else {}
+                        details = invoice_data(payload)
+                        print_invoice_with_logo(printer, format_invoice(payload,cfg.paper_invoice_mm),
+                                                clean(details["logo"]),cfg.paper_invoice_mm,cfg.invoice_cut)
+                    else:
+                        print_text(printer,text,cfg.kitchen_cut)
                     rpc(
                         cfg,
                         "print_agent_finish_job",
