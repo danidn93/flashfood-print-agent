@@ -25,7 +25,7 @@ from build_config import (
 )
 
 APP_NAME = "FlashFood Print Agent"
-APP_VERSION = "1.5.1"
+APP_VERSION = "1.6.0"
 POLL_SECONDS = 3
 REQUEST_TIMEOUT = 20
 
